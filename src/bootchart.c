@@ -41,6 +41,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sched.h>
+#include <sys/resource.h>
 #include <sys/uio.h>
 #include <time.h>
 #include <unistd.h>
@@ -85,6 +87,7 @@ bool arg_show_cmdline = false;
 bool arg_show_cgroup = false;
 bool arg_pss = false;
 bool arg_from_nowtime = false;
+bool arg_auto_downclocking = false;
 int arg_duration = 0;
 bool arg_percpu = false;
 int arg_samples_len = DEFAULT_SAMPLES_LEN; /* we record len+1 (1 start sample) */
@@ -136,6 +139,7 @@ static void help(void) {
                "  -r --rel             Record time relative to recording\n"
                "  -t --nowtime         Caculate process run-time relative to now\n"
                "  -d --duration=DUR    Duration of recording [%g], unit is seconds\n"
+               "  -D --Downclocking    Auto downclock the sample-freq, avoid the problem of low-performance machines which not able to sample\n"
                "  -f --freq=FREQ       Sample frequency [%g]\n"
                "  -n --samples=N       Stop sampling at [%d] samples\n"
                "  -x --scale-x=N       Scale the graph horizontally [%g] \n"
@@ -169,6 +173,7 @@ static int parse_argv(int argc, char *argv[]) {
                 {"rel",           no_argument,        NULL,  'r'       },
                 {"nowtime",       no_argument,        NULL,  't'       },
                 {"duration",      required_argument,  NULL,  'd'       },
+                {"downclocking",  no_argument,        NULL,  'D'       },
                 {"freq",          required_argument,  NULL,  'f'       },
                 {"samples",       required_argument,  NULL,  'n'       },
                 {"pss",           no_argument,        NULL,  'p'       },
@@ -189,7 +194,7 @@ static int parse_argv(int argc, char *argv[]) {
         if (getpid() == 1)
                 opterr = 0;
 
-        while ((c = getopt_long(argc, argv, "ertd:pf:n:o:i:FCchx:y:", options, NULL)) >= 0)
+        while ((c = getopt_long(argc, argv, "ertd:Dpf:n:o:i:FCchx:y:", options, NULL)) >= 0)
                 switch (c) {
 
                 case 'r':
@@ -209,6 +214,9 @@ static int parse_argv(int argc, char *argv[]) {
                                 return -EINVAL;
                         }
                         arg_samples_len = 0; // 先设置为0， 等参数解析完成后再设置
+                        break;
+                case 'D':
+                        arg_auto_downclocking = true;
                         break;
                 case 'f':
                         r = safe_atod(optarg, &arg_hz);
@@ -339,6 +347,23 @@ static int do_journal_append(char *file) {
         return 0;
 }
 
+static void set_high_priority(void)
+{
+        struct sched_param sp = {
+                .sched_priority = sched_get_priority_max(SCHED_FIFO),
+        };
+        int r;
+
+        r = sched_setscheduler(0, SCHED_FIFO, &sp);
+        if (r < 0)
+        {
+                log_warning_errno(errno, "Failed to set SCHED_FIFO scheduler: %m");
+                r = setpriority(PRIO_PROCESS, 0, -20);
+                if (r < 0)
+                        log_warning_errno(errno, "Failed to set high priority: %m");
+        }
+}
+
 int main(int argc, char *argv[]) {
         static struct list_sample_data *sampledata;
         _cleanup_closedir_ DIR *proc = NULL;
@@ -401,7 +426,7 @@ int main(int argc, char *argv[]) {
         /* handle TERM/INT nicely */
         sigaction(SIGHUP, &sig, NULL);
 
-        interval = (1.0 / arg_hz) * 1000000000.0;
+        interval = (1.0 / arg_hz) * 1000000000.0;               // 采样帧的理论间隔时间，纳秒单位
 
         if (arg_relative)
                 graph_start = log_start = gettime_ns();
@@ -426,6 +451,13 @@ int main(int argc, char *argv[]) {
         has_procfs = access("/proc/vmstat", F_OK) == 0;
 
         LIST_HEAD_INIT(head);
+
+        // 启用自动降频的情况下，我们需要设置高优先级，尽可能保证采样能被调度到
+        if (arg_auto_downclocking)
+        {
+                set_high_priority();
+                log_info("systemd-bootchart: set high priority for bootchart process\n");
+        }
 
         /* main program loop */
         for (samples = 0; !exiting && samples < arg_samples_len; samples++)
@@ -464,10 +496,10 @@ int main(int argc, char *argv[]) {
                                 return EXIT_FAILURE;
                 }
 
-                sample_stop = gettime_ns();
+                sample_stop = gettime_ns();     // 当前采样的结束时间
 
-                elapsed = (sample_stop - sampledata->sampletime) * 1000000000.0;
-                timeleft = interval - elapsed;
+                elapsed = (sample_stop - sampledata->sampletime) * 1000000000.0;        // 上一帧采样的持续时间，纳秒单位
+                timeleft = interval - elapsed;          // 当前帧采样结束后，还应当等待多少时间
 
                 /*
                  * check if we have not consumed our entire timeslice. If we
@@ -475,24 +507,89 @@ int main(int argc, char *argv[]) {
                  * we'll lose all the missed samples and overrun our total
                  * time
                  */
-                if (timeleft > 0) {
+                if (timeleft > 0)
+                {
                         struct timespec req;
 
                         req.tv_sec = (time_t)(timeleft / 1000000000.0);
                         req.tv_nsec = (long)(timeleft - (req.tv_sec * 1000000000.0));
 
                         res = nanosleep(&req, NULL);
-                        if (res) {
+                        if (res)
+                        {
                                 if (errno == EINTR)
                                         /* caught signal, probably HUP! */
                                         break;
                                 log_error_errno(errno, "nanosleep() failed: %m");
                                 return EXIT_FAILURE;
                         }
-                } else {
+                }
+                else
+                {
                         overrun++;
-                        /* calculate how many samples we lost and scrap them */
-                        arg_samples_len -= (int)(-timeleft / interval);
+                        /*
+                        * 自动降频的情况下，我们应当至少保证每秒采样一次
+                        * 因此帧跳过的动作，应该是跳过当前帧
+                        * 判断 timeleft的值超过多少个interval
+                        * 降频的数据从这个值开始减，比如超过3个interval，那么hz就-4，但至少为1
+                        * 同时重新计算interval的值
+                        */
+                        if (arg_auto_downclocking)
+                        {
+                                int downclock_counts = (int)(-timeleft / interval);
+                                int old_hz = arg_hz;    // 保存原hz值，用于后面的降频帧计算
+                                if (downclock_counts > 0)
+                                {
+                                        if (arg_hz - downclock_counts < 1)
+                                        {
+                                                log_emergency("systemd-bootchart: sample frequency too low, cannot downclock further, setting to 1Hz\n");
+                                                arg_hz = 1;
+                                        }
+                                        else
+                                        {
+                                                arg_hz -= downclock_counts;
+                                        }
+
+                                        log_info("systemd-bootchart: downclocking sample frequency to %gHz, due to overrun %i times\n",
+                                                 arg_hz, downclock_counts);
+                                }
+                                else    // 如果速度没有太慢，那么只降 1 帧
+                                {
+                                        downclock_counts = 1;
+                                }
+
+                                /*
+                                        自动降频，因此需要重新调整arg_samples_len的值，调整规则：
+                                        1. 如果当前帧在降频后已经是本秒的末尾帧，判断逻辑是 samples % old_hz >= arg_hz，则
+                                           arg_samples_len 应当减去 downclock_counts + old_hz 的值，然后除以old_hz，得到近
+                                           似的剩余秒数，然后 arg_sample_len -= 近似的剩余秒数 * downclock_counts + arg_hz
+                                        2. 如果当前帧在降频后不是本秒的末尾帧，判断逻辑是 samples % old_hz < arg_hz，则
+                                           arg_samples_len 应当减去 downclock_counts 的值，然后除以old_hz，得到近似的剩余秒数，
+                                           然后 arg_sample_len -= 近似的剩余秒数 * downclock_counts
+                                */
+                               int remain_samples = arg_samples_len - samples;  // 先计算原始剩余帧
+                               if (samples % (int)old_hz >= arg_hz)
+                                {
+                                        int remaining_secs = (remain_samples - old_hz) > 0 \
+                                                                ? (remain_samples - old_hz) / old_hz \
+                                                                : 0;
+                                        // arg_samples_len -= (remaining_secs * downclock_counts + arg_hz);
+                                        arg_samples_len = samples + (remaining_secs * arg_hz) + arg_hz;
+                                }
+                                else
+                                {
+                                        int remaining_secs = (remain_samples - old_hz + downclock_counts) > 0 \
+                                                                ? (remain_samples - old_hz + downclock_counts) / old_hz \
+                                                                : 0;
+                                        // arg_samples_len -= (remaining_secs * downclock_counts);
+                                        arg_samples_len = samples + (remaining_secs * arg_hz) + arg_hz - downclock_counts;
+                                }
+                                interval = (1.0 / arg_hz) * 1000000000.0; // 重新计算采样间隔
+
+                        }
+                        else
+                                /* calculate how many samples we lost and scrap them */
+                                arg_samples_len -= (int)(-timeleft / interval);
                 }
                 LIST_PREPEND(link, head, sampledata);
         }
