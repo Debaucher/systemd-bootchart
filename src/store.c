@@ -264,6 +264,9 @@ schedstat_next:
                                 break;
                 }
 
+                // ps 是指向整个进程链表的指针
+                // ps->sample 是指向当前进程的采样数据结构
+
                 /* end of our LL? then append a new record */
                 if (ps->pid != pid)
                 {
@@ -273,7 +276,8 @@ schedstat_next:
 
                         /* find the insertion point for the last item */
                         struct ps_struct **ps_next = &ps->next_ps;
-                        while (*ps_next) {
+                        while (*ps_next)
+                        {
                                 ps_next = &(*ps_next)->next_ps;
                         }
 
@@ -406,7 +410,13 @@ no_sched:
 #ifdef BOOTCHART_DEBUG
                         printf("Found new process [%s]%d -> Parent %d\n", ps->name, pid, ps->ppid);
 #endif
-                }       // 新进程添加完成，但是注意这里的第一个sample结构体并不会被后续代码操作
+                }       // 新进程添加完成
+#ifdef BOOTCHART_DEBUG
+                else
+                {
+                        printf("Found existing process [%s]%d -> Parent %d\n", ps->name, pid, ps->ppid);
+                }
+#endif
 
 
                 /* else -> found pid, append data in ps */
@@ -431,6 +441,9 @@ no_sched:
                 if (!sscanf(buf, "%s %s %*s", rt, wt))
                         continue;
 
+
+                // 如果不是新进程，或者说我们期望他从第一个节点就记录开销数据（也就是starttime是从bootchart启动的时候开始记录，而不是从开机开始记录）
+                // 如果第一个ps是0，那么就代表着CPU开销是从这个进程启动开始算起的，而from_nowtime意味着CPU开销从bootchart启动开始算起
                 if (!newproc || !arg_from_nowtime)
                 {
                         ps->sample->next = new0(struct ps_sched_struct, 1);

@@ -377,7 +377,8 @@ static int output_sample_data(const char *filename,
         fprintf(f, "# Format: PID PPID name total_runtime start_time end_time\n");
 
         ps = ps_first;
-        while (ps->next_ps) {
+        while (ps->next_ps)
+        {
                 ps = ps->next_ps;
                 if (!ps) continue;
 
