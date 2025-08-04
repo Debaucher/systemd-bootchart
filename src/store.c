@@ -248,6 +248,8 @@ schedstat_next:
                 int pid;
                 struct ps_struct *ps;
 
+                newproc = false;
+
                 if ((ent->d_name[0] < '0') || (ent->d_name[0] > '9'))
                         continue;
 
@@ -264,12 +266,13 @@ schedstat_next:
                                 break;
                 }
 
-                // ps 是指向整个进程链表的指针
+                // ps 指向一个进程的记录入口
                 // ps->sample 是指向当前进程的采样数据结构
 
                 /* end of our LL? then append a new record */
                 if (ps->pid != pid)
                 {
+                        newproc = true;
                         _cleanup_fclose_ FILE *st = NULL;
                         char t[32];
                         struct ps_struct *parent;
@@ -338,8 +341,6 @@ schedstat_next:
                         r = safe_atod(t, &ps->starttime);
                         if (r < 0)
                                 goto no_sched;
-
-                        newproc = true;
 
                         ps->starttime /= 1000.0;
 
@@ -442,7 +443,7 @@ no_sched:
                         continue;
 
 
-                // 如果不是新进程，或者说我们期望他从第一个节点就记录开销数据（也就是starttime是从bootchart启动的时候开始记录，而不是从开机开始记录）
+                // 如果他既是一个新进程，又设置了nowtime，那么就跳过新建节点的流程（也就是starttime是从bootchart启动的时候开始记录，而不是从开机开始记录）
                 // 如果第一个ps是0，那么就代表着CPU开销是从这个进程启动开始算起的，而from_nowtime意味着CPU开销从bootchart启动开始算起
                 if (!newproc || !arg_from_nowtime)
                 {

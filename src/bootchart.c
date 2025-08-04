@@ -589,7 +589,8 @@ int main(int argc, char *argv[]) {
                         proc = opendir("/proc");
                 }
 
-                if (proc) {
+                if (proc)
+                {
                         r = log_sample(proc, samples, ps_first, &sampledata, &pscount, &n_cpus);
                         if (r < 0)
                                 return EXIT_FAILURE;
