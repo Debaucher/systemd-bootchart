@@ -1,4 +1,19 @@
-systemd-bootchart (236-1) unstable; urgency=medium
+systemd-bootchart (235-2kylin2.0k0.2) v101; urgency=medium
+
+  [ liuyunhe ]
+  * change debhelper-copmat version from =13 to = 12, adpot SP1
+
+ -- liuyunhe <liuyunhe@kylinos.cn>  Fri, 01 Aug 2025 15:59:33 +0800
+
+systemd-bootchart (235-2kylin2.0k0.1) unstable; urgency=medium
+
+  [ liuyunhe ]
+  * add -D argument, when arg is set, bootchart will auto-downclocking
+    while system is low-performance or high load.
+
+ -- liuyunhe <liuyunhe@kylinos.cn>  Fri, 01 Aug 2025 15:40:11 +0800
+
+systemd-bootchart (235-2kylin1.0k0.1) unstable; urgency=medium
 
   [ liuyunhe ]
   * add -t argument, when arg is set, the runtime counts will start from

@@ -12,7 +12,7 @@ Rules-Requires-Root: no
 Vcs-Git: https://salsa.debian.org/systemd-team/systemd-bootchart.git
 Vcs-Browser: https://salsa.debian.org/systemd-team/systemd-bootchart
 Homepage: https://github.com/systemd/systemd-bootchart/
-Build-Depends: debhelper-compat (= 13),
+Build-Depends: debhelper-compat (= 12),
                intltool,
                pkg-config,
                libsystemd-dev,
