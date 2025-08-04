@@ -1,3 +1,10 @@
+systemd-bootchart (235-2kylin2.0k0.3) v101; urgency=medium
+
+  [ liuyunhe ]
+  * fix bug: The newproc variable was not reset to zero during a round of recursion.
+
+ -- liuyunhe <liuyunhe@kylinos.cn>  Mon, 04 Aug 2025 22:55:17 +0800
+
 systemd-bootchart (235-2kylin2.0k0.2) v101; urgency=medium
 
   [ liuyunhe ]
