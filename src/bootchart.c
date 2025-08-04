@@ -97,6 +97,7 @@ double arg_scale_y = DEFAULT_SCALE_Y;
 
 char arg_init_path[PATH_MAX] = DEFAULT_INIT;
 char arg_output_path[PATH_MAX] = DEFAULT_OUTPUT;
+char arg_log_samples[PATH_MAX] = "";
 
 static void signal_handler(int sig) {
         exiting = 1;
@@ -138,8 +139,9 @@ static void help(void) {
                "Options:\n"
                "  -r --rel             Record time relative to recording\n"
                "  -t --nowtime         Caculate process run-time relative to now\n"
-               "  -d --duration=DUR    Duration of recording [%g], unit is seconds\n"
+               "  -d --duration=DUR    Duration of recording, unit is seconds\n"
                "  -D --Downclocking    Auto downclock the sample-freq, avoid the problem of low-performance machines which not able to sample\n"
+               "  -O --Outputsamples=PATH    Log all samples in Output path\n"
                "  -f --freq=FREQ       Sample frequency [%g]\n"
                "  -n --samples=N       Stop sampling at [%d] samples\n"
                "  -x --scale-x=N       Scale the graph horizontally [%g] \n"
@@ -173,6 +175,7 @@ static int parse_argv(int argc, char *argv[]) {
                 {"rel",           no_argument,        NULL,  'r'       },
                 {"nowtime",       no_argument,        NULL,  't'       },
                 {"duration",      required_argument,  NULL,  'd'       },
+                {"Outputsamples", required_argument,  NULL,  'O'       },
                 {"downclocking",  no_argument,        NULL,  'D'       },
                 {"freq",          required_argument,  NULL,  'f'       },
                 {"samples",       required_argument,  NULL,  'n'       },
@@ -194,7 +197,7 @@ static int parse_argv(int argc, char *argv[]) {
         if (getpid() == 1)
                 opterr = 0;
 
-        while ((c = getopt_long(argc, argv, "ertd:Dpf:n:o:i:FCchx:y:", options, NULL)) >= 0)
+        while ((c = getopt_long(argc, argv, "ertd:Dpf:n:o:i:FCchO:x:y:", options, NULL)) >= 0)
                 switch (c) {
 
                 case 'r':
@@ -217,6 +220,9 @@ static int parse_argv(int argc, char *argv[]) {
                         break;
                 case 'D':
                         arg_auto_downclocking = true;
+                        break;
+                case 'O':
+                        strscpy(arg_log_samples, sizeof(arg_log_samples), optarg);
                         break;
                 case 'f':
                         r = safe_atod(optarg, &arg_hz);
@@ -294,6 +300,98 @@ static int parse_argv(int argc, char *argv[]) {
                 arg_samples_len = arg_duration * arg_hz;
 
         return 1;
+}
+
+static int output_sample_data(const char *filename,
+                             struct list_sample_data *head,
+                             struct ps_struct *ps_first,
+                             int n_samples,
+                             int pscount,
+                             int n_cpus)
+{
+        FILE *f;
+        struct list_sample_data *sampledata;
+        struct ps_struct *ps;
+        int sample_num = 0;
+
+        f = fopen(filename, "w");
+        if (!f)
+        {
+                log_error_errno(errno, "Failed to open data output file %s: %m", filename);
+                return -errno;
+        }
+
+        // 写入头部信息
+        fprintf(f, "# systemd-bootchart sample data output\n");
+        fprintf(f, "# Total samples: %d\n", n_samples);
+        fprintf(f, "# Total processes: %d\n", pscount);
+        fprintf(f, "# CPU count: %d\n", n_cpus);
+        fprintf(f, "# Sampling frequency: %.2f Hz\n", arg_hz);
+        fprintf(f, "# Format: [sample_num] timestamp cpu_usage[0..n] io_read io_write entropy process_count\n");
+        fprintf(f, "#\n");
+
+        // 遍历所有采样数据
+        LIST_FOREACH_BEFORE(link, sampledata, head)
+        {
+                int running_processes = 0;
+
+                // 统计当前时刻运行的进程数
+                ps = ps_first;
+                while (ps->next_ps)
+                {
+                        ps = ps->next_ps;
+                        if (!ps)
+                                continue;
+
+                        // 检查进程是否在当前采样时刻存在
+                        struct ps_sched_struct *ps_sample = ps->first;
+                        while (ps_sample && ps_sample->next) {
+                                if (ps_sample->sampledata == sampledata) {
+                                        running_processes++;
+                                        break;
+                                }
+                                ps_sample = ps_sample->next;
+                        }
+                }
+
+                // 输出采样数据
+                fprintf(f, "[%04d] %.6f", sample_num, sampledata->sampletime);
+
+                // CPU 使用率 (每个CPU)
+                for (int cpu = 0; cpu < n_cpus; cpu++) {
+                        fprintf(f, " %.6f", sampledata->runtime[cpu] / 1000000000.0);
+                }
+
+                // I/O 数据
+                fprintf(f, " %lu %lu", sampledata->blockstat.bi, sampledata->blockstat.bo);
+                // 熵池大小
+                fprintf(f, " %d", sampledata->entropy_avail);
+                // 运行进程数
+                fprintf(f, " %d", running_processes);
+                fprintf(f, "\n");
+                sample_num++;
+        }
+
+        // 输出进程详细信息
+        fprintf(f, "\n# Process details:\n");
+        fprintf(f, "# Format: PID PPID name total_runtime start_time end_time\n");
+
+        ps = ps_first;
+        while (ps->next_ps) {
+                ps = ps->next_ps;
+                if (!ps) continue;
+
+                double start_time = ps->first ? ps->first->sampledata->sampletime : 0.0;
+                double end_time = ps->last ? ps->last->sampledata->sampletime : 0.0;
+
+                fprintf(f, "PROC %d %d %s %.6f %.6f %.6f\n",
+                        ps->pid, ps->ppid, ps->name,
+                        ps->total, start_time, end_time);
+        }
+
+        fclose(f);
+        log_info("Sample data written to %s", filename);
+        return 0;
 }
 
 static int do_journal_append(char *file) {
@@ -615,6 +713,15 @@ int main(int argc, char *argv[]) {
         if (!of) {
                 log_error("Error opening output file '%s': %m\n", output_file);
                 return EXIT_FAILURE;
+        }
+
+        if (strlen(arg_log_samples) > 0)
+        {
+                r = output_sample_data(arg_log_samples, head, ps_first, samples, pscount, n_cpus);
+                if (r < 0)
+                {
+                        log_error_errno(r, "Failed to output sample data to %s: %m", arg_log_samples);
+                }
         }
 
         r = svg_do(of, strna(build), head, ps_first,
