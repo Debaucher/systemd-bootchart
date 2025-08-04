@@ -1322,17 +1322,19 @@ static void svg_top_ten_pss(FILE *of, struct ps_struct *ps_first) {
 }
 
 int svg_do(FILE *of,
-           const char *build,
+           const char *build,           // 系统build号
            struct list_sample_data *head,
            struct ps_struct *ps_first,
-           int n_samples,
-           int pscount,
-           int n_cpus,
+           int n_samples,               // 采样总帧数
+           int pscount,                 // 采样过程中的进程数
+           int n_cpus,                  // CPU数量
            double graph_start,
            double log_start,
-           double interval,
-           int overrun) {
-
+           double interval,             // 采样间隔
+           int overrun)                 // 采样过程中发生的溢出次数
+{
+        printf("build: %s, samples: %d, pscount: %d, n_cpus: %d, graph_start: %.03f, log_start: %.03f, interval: %.03f, overrun: %d\n",
+               build, n_samples, pscount, n_cpus, graph_start, log_start, interval, overrun);
         struct ps_struct *ps;
         double offset = 7;
         int r, c;
